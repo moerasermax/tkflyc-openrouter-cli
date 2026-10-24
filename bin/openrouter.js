@@ -458,28 +458,31 @@ function scopeText(ctx) {
     : `只能讀 ${ctx.root}`;
 }
 
-function agentPrompt(ctx) {
+function agentPrompt(ctx, snapshot) {
   const scope =
     ctx.scope === 'all'
       ? `- 可讀範圍：所有磁碟（${ctx.roots.join('、')}）。要看工作資料夾以外的地方，用絕對路徑，例如 D:\\Projects\\app\\README.md；也可以 list_dir 磁碟根目錄（例如 E:\\）找方向。`
       : '- 可讀範圍：只限工作資料夾。';
   return [
     '你在使用者的電腦上執行，可以用唯讀工具查看檔案：',
-    `- 工作資料夾：${ctx.root}（相對路徑以這裡為準）`,
+    `- 工作資料夾：${ctx.root}（使用者就是在這裡啟動你的；相對路徑以這裡為準）`,
     scope,
     `- 作業系統：${process.platform}；今天日期：${new Date().toISOString().slice(0, 10)}`,
     '- 你只有唯讀工具（list_dir、read_file、search、find_files），不能修改、建立或刪除檔案，也不能執行指令；需要修改或執行時，把建議寫給使用者自己做。',
     '- 敏感位置（使用者目錄的 AppData、.ssh、.config、.local 等、Windows 系統資料夾、.env 與私鑰）由工具負責拒讀。其他檔案照常用工具讀取，不要只憑檔名或位置就自己拒絕；工具回報拒讀時，告訴使用者原因，不要換其他路徑嘗試繞過。',
-    '- 使用者問到資料夾、專案、檔案或程式碼時，先用工具查看再回答，不要請使用者貼檔案內容或目錄樹。',
+    '- 使用者說「這個專案」「這裡」「這個資料夾」「這支程式」，或沒有指明位置時，一律是指工作資料夾：直接用工具查看再回答，不要反問路徑，也不要請使用者貼檔案內容或目錄樹。只有使用者明確提到其他路徑時，才去其他地方。',
     '- 先用 list_dir 了解結構，再用 find_files 或 search 找相關檔案，最後用 read_file 讀需要的部分；不要一次讀進大量無關的檔案。搜尋整個磁碟很慢而且可能只掃到一部分，先縮小到可能的資料夾。',
     '- 引用檔案時附上路徑與行號：工作資料夾內用相對路徑（例如 src/server.cs:42），其他地方用絕對路徑。',
+    '',
+    '工作資料夾第一層的內容（這一輪開始時自動列出；更深的層級或其他位置請用工具查看）：',
+    snapshot,
   ].join('\n');
 }
 
-// 使用者自訂的系統提示會取代預設的語言要求；開了唯讀工具時再附上工作資料夾與工具規則
-function systemPrompt(session, ctx) {
+// 使用者自訂的系統提示會取代預設的語言要求；開了唯讀工具時再附上工作資料夾、工具規則與資料夾清單
+function systemPrompt(session, ctx, snapshot = '') {
   const parts = [session.system || DEFAULT_SYSTEM];
-  if (ctx) parts.push(agentPrompt(ctx));
+  if (ctx) parts.push(agentPrompt(ctx, snapshot));
   return parts.join('\n\n');
 }
 
@@ -506,13 +509,15 @@ async function runTurn(key, session, { showReasoning = false, signal, toolCtx = 
     console.error(dim('（這個模型不支援工具呼叫，這一輪改用一般聊天；/model 清單裡標 ✓ 的模型才能讀檔）', process.stderr));
     ctx = null;
   }
+  // 每一輪重新列一次，對話中新增或刪除的檔案也會反映出來
+  const snapshot = ctx ? tools.workingFolderSnapshot(ctx) : '';
 
   let result;
   let turnUsage = null;
   let toolRuns = 0;
   try {
     for (let step = 1; ; step++) {
-      const messages = [{ role: 'system', content: systemPrompt(session, ctx) }, ...session.messages.map(toApiMessage)];
+      const messages = [{ role: 'system', content: systemPrompt(session, ctx, snapshot) }, ...session.messages.map(toApiMessage)];
       try {
         result = await callModel(key, session, messages, {
           showReasoning,

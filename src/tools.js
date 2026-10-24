@@ -346,7 +346,16 @@ function* walkFiles(ctx, base, state, maxEntries) {
 
 // ── 工具本體 ─────────────────────────────────────────────
 
-function listDir(ctx, args) {
+// 工作資料夾第一層的清單，放進系統提示，讓模型一開始就知道資料夾裡有什麼；讀不到時回傳說明而不是丟錯
+export function workingFolderSnapshot(ctx, maxEntries = 80) {
+  try {
+    return listDir(ctx, { path: '.', depth: 1 }, maxEntries).content;
+  } catch (err) {
+    return `（無法列出工作資料夾：${err.message}）`;
+  }
+}
+
+function listDir(ctx, args, maxEntries = MAX_LIST_ENTRIES) {
   const { abs, shown } = resolvePath(ctx, args.path);
   if (!fs.statSync(abs).isDirectory()) throw new ToolError(`${shown} 不是資料夾，請改用 read_file`);
   const depth = toInt(args.depth, 1, 1, 4);
@@ -362,7 +371,7 @@ function listDir(ctx, args) {
     }
     entries.sort((a, b) => b.isDirectory() - a.isDirectory() || a.name.localeCompare(b.name));
     for (const entry of entries) {
-      if (lines.length >= MAX_LIST_ENTRIES) {
+      if (lines.length >= maxEntries) {
         truncated = true;
         return;
       }
@@ -387,7 +396,7 @@ function listDir(ctx, args) {
     }
   };
   visit(abs, 0);
-  if (truncated) lines.push('…項目太多，已截斷；請指定子資料夾或降低 depth');
+  if (truncated) lines.push(`…項目太多，只列出前 ${maxEntries} 項；需要時用 list_dir 指定子資料夾或降低 depth`);
   return {
     content: `資料夾 ${dirLabel(shown)}（展開 ${depth} 層）\n${lines.join('\n') || '（空資料夾）'}`,
     summary: `列出 ${dirLabel(shown)}（${lines.length} 項）`,
