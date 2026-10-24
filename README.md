@@ -42,14 +42,23 @@ API key 在 <https://openrouter.ai/settings/keys> 建立。也可以改用環境
 | `search` | 搜尋檔案內容（正規表示式或純文字），可用 `*.cs` 這類 glob 過濾 |
 | `find_files` | 用檔名或路徑 glob 找檔案 |
 
-安全範圍：
+可讀範圍：
+
+- **所有磁碟（預設）**：C:\、D:\、E:\ 等所有磁碟都能讀。相對路徑以啟動 CLI 時所在的資料夾為準，其他地方用絕對路徑，例如直接問「幫我看 E:\Projects\game 是什麼專案」
+- **只開放啟動資料夾**：在資料位置的 `config.json` 設 `"agentScope": "cwd"`
+
+安全設計：
 
 - **唯讀**：沒有寫入、刪除或執行指令的工具，模型就算想改也改不了
-- **範圍**：只能讀「啟動 CLI 時所在的資料夾」裡的東西；`../`、絕對路徑、連結（symlink／junction）都出不去
-- **拒讀**：`.env`、私鑰（`*.pem`、`*.key`、`id_rsa`…）、`.npmrc` 等敏感檔案，以及 CLI 自己的資料位置（裡面有你的 API key）
-- **略過**：`.git`、`node_modules` 等資料夾在搜尋時略過
+- **一律拒讀**（就算在可讀範圍內）：
+  - `.env`、私鑰（`*.pem`、`*.key`、`id_rsa`…）、`.npmrc`、`.git-credentials` 等敏感檔案
+  - 使用者目錄的 `AppData`、`.ssh`、`.config`、`.local`、`.claude`、`.codex`、`.aws`、`.docker`、`.gnupg`、`.azure`、`.kube` 與 `.claude.json`
+  - Windows 系統資料夾（`C:\Windows`），以及各磁碟的 `$Recycle.Bin`、`System Volume Information`
+  - CLI 自己的資料位置（裡面有你的 API key）
+- **連結與短檔名繞不過**：路徑會先解析成作業系統的真實路徑（解開 symlink／junction，以及 `APPDAT~1` 這類 8.3 短檔名）再判斷
+- **搜尋有上限**：`.git`、`node_modules` 等資料夾會略過；搜尋整個磁碟時超過 15 秒或掃描數量上限就停，並告訴模型「只掃了一部分」
 
-⚠️ 讀到的檔案內容會送到 OpenRouter 與模型供應商。處理機密或受保密協議約束的專案時，請加 `--no-agent` 或在對話中輸入 `/agent off`。
+⚠️ 讀到的檔案內容會送到 OpenRouter 與模型供應商，而預設範圍是整台電腦。一般設定檔裡如果寫了密碼或 key（例如某個專案的 `config.json`），工具不會擋。處理機密或受保密協議約束的資料時，請加 `--no-agent` 或在對話中輸入 `/agent off`。
 
 不是每個模型都支援工具呼叫。`openrouter models` 與 `/model` 清單裡「工具」欄標 ✓ 的模型才能讀檔；不支援的模型會自動退回一般聊天。
 
@@ -95,7 +104,7 @@ API key 在 <https://openrouter.ai/settings/keys> 建立。也可以改用環境
 - 從 GitHub 安裝：`~/.tkflyc-openrouter/`（Windows 是 `%USERPROFILE%\.tkflyc-openrouter\`）
 - 從 git clone 的專案資料夾直接執行：專案內的 `data/`（已列入 `.gitignore`）
 
-設定環境變數 `OPENROUTER_CLI_HOME` 可以改到任何位置。`openrouter help` 會顯示目前實際使用的位置。想讓讀檔功能預設關閉，在該位置的 `config.json` 加上 `"agent": false`。
+設定環境變數 `OPENROUTER_CLI_HOME` 可以改到任何位置。`openrouter help` 會顯示目前實際使用的位置。想讓讀檔功能預設關閉，在該位置的 `config.json` 加上 `"agent": false`；只想開放啟動資料夾，加上 `"agentScope": "cwd"`。
 
 API key 以明文存在 `config.json`，請不要把這個資料夾分享或放進版控。
 

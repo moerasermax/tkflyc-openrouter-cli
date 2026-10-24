@@ -31,9 +31,11 @@ const HELP = `openrouter — OpenRouter 命令列工具
   openrouter sessions                 列出對話紀錄
   openrouter help                     顯示這份說明
 
-唯讀工具（預設開啟）：模型可以列目錄、讀檔、搜尋你啟動 CLI 時所在資料夾裡的檔案，
-不能修改或執行任何東西。讀到的內容會送到 OpenRouter 與模型供應商；.env、私鑰等敏感檔案一律拒讀。
-不想讓模型讀檔時加 --no-agent，或在對話中輸入 /agent off。
+唯讀工具（預設開啟）：模型可以列目錄、讀檔、搜尋這台電腦所有磁碟上的檔案（相對路徑以
+啟動 CLI 時所在的資料夾為準），不能修改或執行任何東西。讀到的內容會送到 OpenRouter 與模型供應商；
+.env、私鑰、使用者目錄的 AppData／.ssh／.config／.local 等放憑證的位置、Windows 系統資料夾一律拒讀。
+不想讓模型讀檔時加 --no-agent，或在對話中輸入 /agent off；只想開放啟動資料夾時，
+在資料位置的 config.json 設 "agentScope": "cwd"。
 
 問題以 - 開頭時，放在 -- 後面：openrouter ask -- "-1 的平方根"
 
@@ -448,15 +450,29 @@ async function callModel(key, session, messages, { showReasoning = false, signal
 const DEFAULT_SYSTEM = '請一律使用繁體中文（台灣用語）回答。';
 const MAX_TOOL_STEPS = 25;
 
+const agentScope = (config) => (config.agentScope === 'cwd' ? 'cwd' : 'all');
+
+function scopeText(ctx) {
+  return ctx.scope === 'all'
+    ? `可讀所有磁碟 ${ctx.roots.join('、')}（敏感位置除外），相對路徑以 ${ctx.root} 為準`
+    : `只能讀 ${ctx.root}`;
+}
+
 function agentPrompt(ctx) {
+  const scope =
+    ctx.scope === 'all'
+      ? `- 可讀範圍：所有磁碟（${ctx.roots.join('、')}）。要看工作資料夾以外的地方，用絕對路徑，例如 D:\\Projects\\app\\README.md；也可以 list_dir 磁碟根目錄（例如 E:\\）找方向。`
+      : '- 可讀範圍：只限工作資料夾。';
   return [
-    '你在使用者的電腦上執行，可以用工具查看「工作資料夾」裡的檔案：',
-    `- 工作資料夾：${ctx.root}`,
+    '你在使用者的電腦上執行，可以用唯讀工具查看檔案：',
+    `- 工作資料夾：${ctx.root}（相對路徑以這裡為準）`,
+    scope,
     `- 作業系統：${process.platform}；今天日期：${new Date().toISOString().slice(0, 10)}`,
     '- 你只有唯讀工具（list_dir、read_file、search、find_files），不能修改、建立或刪除檔案，也不能執行指令；需要修改或執行時，把建議寫給使用者自己做。',
-    '- 使用者問到這個資料夾、專案、檔案或程式碼時，先用工具查看再回答，不要請使用者貼檔案內容或目錄樹。',
-    '- 先用 list_dir 了解結構，再用 find_files 或 search 找相關檔案，最後用 read_file 讀需要的部分；不要一次讀進大量無關的檔案。',
-    '- 引用檔案時用相對路徑與行號，例如 src/server.cs:42。',
+    '- 敏感位置（使用者目錄的 AppData、.ssh、.config、.local 等、Windows 系統資料夾、.env 與私鑰）由工具負責拒讀。其他檔案照常用工具讀取，不要只憑檔名或位置就自己拒絕；工具回報拒讀時，告訴使用者原因，不要換其他路徑嘗試繞過。',
+    '- 使用者問到資料夾、專案、檔案或程式碼時，先用工具查看再回答，不要請使用者貼檔案內容或目錄樹。',
+    '- 先用 list_dir 了解結構，再用 find_files 或 search 找相關檔案，最後用 read_file 讀需要的部分；不要一次讀進大量無關的檔案。搜尋整個磁碟很慢而且可能只掃到一部分，先縮小到可能的資料夾。',
+    '- 引用檔案時附上路徑與行號：工作資料夾內用相對路徑（例如 src/server.cs:42），其他地方用絕對路徑。',
   ].join('\n');
 }
 
@@ -580,7 +596,7 @@ async function cmdAsk(terms, opts) {
   session.messages.push({ role: 'user', content: prompt });
 
   const agentOn = !opts['no-agent'] && config.agent !== false;
-  const toolCtx = agentOn ? tools.createContext(process.cwd(), [store.DATA_DIR]) : null;
+  const toolCtx = agentOn ? tools.createContext(process.cwd(), { deny: [store.DATA_DIR], scope: agentScope(config) }) : null;
 
   const ctrl = new AbortController();
   process.once('SIGINT', () => ctrl.abort());
@@ -609,8 +625,8 @@ async function cmdChat(opts) {
   if (opts['no-stream']) session.stream = false;
   let showReasoning = config.showReasoning ?? false;
   let agentOn = !opts['no-agent'] && config.agent !== false;
-  const toolCtx = tools.createContext(process.cwd(), [store.DATA_DIR]);
-  const agentStatus = () => (agentOn ? `開（模型可以讀 ${toolCtx.root} 裡的檔案；/agent off 關閉）` : '關（/agent on 開啟）');
+  const toolCtx = tools.createContext(process.cwd(), { deny: [store.DATA_DIR], scope: agentScope(config) });
+  const agentStatus = () => (agentOn ? `開（${scopeText(toolCtx)}；/agent off 關閉）` : '關（/agent on 開啟）');
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, historySize: 500 });
   const ask = questioner(rl);
