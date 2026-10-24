@@ -1,7 +1,8 @@
 {
   "name": "@tkflyc/openrouter-cli",
-  "version": "0.1.0",
-  "description": "OpenRouter 命令列工具：互動對話（串流）、單次提問（可接 pipe）、模型搜尋與切換（附價格）、額度查詢",
+  "version": "0.2.0",
+  "private": true,
+  "description": "OpenRouter 命令列工具：互動對話（串流）、唯讀讀檔 agent、單次提問（可接 pipe）、模型搜尋與切換（附價格）、額度查詢",
   "type": "module",
   "bin": {
     "openrouter": "bin/openrouter.js"

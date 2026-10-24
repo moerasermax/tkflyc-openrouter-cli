@@ -82,9 +82,20 @@ export async function listModels() {
   return (await res.json()).data ?? [];
 }
 
-// 回傳 { text, usage, model, finish }；被 signal 中斷時 finish 為 'aborted'，text 保留已收到的部分
-export async function chat({ key, model, messages, stream = true, signal, onDelta, onReasoning }) {
+const toToolCall = (c) => ({
+  id: c.id || `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+  name: c.name ?? c.function?.name ?? '',
+  arguments: c.arguments ?? c.function?.arguments ?? '',
+});
+
+// 回傳 { text, toolCalls, usage, model, finish }；被 signal 中斷時 finish 為 'aborted'，text 保留已收到的部分。
+// 帶 tools 時模型可能回 toolCalls（[{ id, name, arguments: JSON 字串 }]）而不是 text。
+export async function chat({ key, model, messages, stream = true, signal, onDelta, onReasoning, tools, toolChoice }) {
   const body = { model, messages, stream, usage: { include: true } };
+  if (tools) {
+    body.tools = tools;
+    body.tool_choice = toolChoice ?? 'auto';
+  }
   const res = await request('/chat/completions', {
     key,
     method: 'POST',
@@ -102,13 +113,17 @@ export async function chat({ key, model, messages, stream = true, signal, onDelt
     if (message.content) onDelta?.(message.content);
     return {
       text: message.content ?? '',
+      toolCalls: (message.tool_calls ?? []).map(toToolCall),
       usage: json.usage ?? null,
       model: json.model ?? model,
       finish: choice.finish_reason ?? null,
     };
   }
 
-  const out = { text: '', usage: null, model, finish: null };
+  const out = { text: '', toolCalls: [], usage: null, model, finish: null };
+  // 串流中的工具呼叫是分段送來的：同一個 index 的 arguments 要接起來
+  const calls = [];
+  const finalize = (result) => ({ ...result, toolCalls: calls.filter(Boolean).map(toToolCall) });
   const decoder = new TextDecoder();
   let buffer = '';
   try {
@@ -121,7 +136,7 @@ export async function chat({ key, model, messages, stream = true, signal, onDelt
         // 只處理 data: 行；": OPENROUTER PROCESSING" 這類註解行是保持連線用的
         if (!line.startsWith('data:')) continue;
         const data = line.slice(5).trim();
-        if (data === '[DONE]') return out;
+        if (data === '[DONE]') return finalize(out);
         let event;
         try {
           event = JSON.parse(data);
@@ -139,11 +154,18 @@ export async function chat({ key, model, messages, stream = true, signal, onDelt
           out.text += delta.content;
           onDelta?.(delta.content);
         }
+        for (const part of delta.tool_calls ?? []) {
+          const index = part.index ?? (part.id ? calls.length : Math.max(0, calls.length - 1));
+          const slot = (calls[index] ??= { id: '', name: '', arguments: '' });
+          if (part.id) slot.id = part.id;
+          if (part.function?.name) slot.name ||= part.function.name;
+          if (part.function?.arguments) slot.arguments += part.function.arguments;
+        }
       }
     }
   } catch (err) {
-    if (signal?.aborted) return { ...out, finish: 'aborted' };
+    if (signal?.aborted) return finalize({ ...out, finish: 'aborted' });
     throw err;
   }
-  return out;
+  return finalize(out);
 }

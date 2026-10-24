@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// openrouter — 個人用 OpenRouter CLI。設定、對話紀錄、快取都放在專案的 data/ 底下。
+// openrouter — OpenRouter 命令列工具。資料位置見 src/store.js；唯讀檔案工具見 src/tools.js。
 import readline from 'node:readline/promises';
 import { parseArgs } from 'node:util';
 import * as api from '../src/api.js';
 import * as store from '../src/store.js';
+import * as tools from '../src/tools.js';
 
 const color = (code) => (text, stream = process.stdout) =>
   stream.isTTY && !process.env.NO_COLOR ? `\x1b[${code}m${text}\x1b[0m` : text;
@@ -17,9 +18,9 @@ const HELP = `openrouter — OpenRouter 命令列工具
 
 用法：
   openrouter                          開始互動對話（同 chat）
-  openrouter chat [-m 模型] [-c | --session ID] [-s 系統提示]
+  openrouter chat [-m 模型] [-c | --session ID] [-s 系統提示] [--no-agent]
                                       互動對話；-c 接續上一次的對話
-  openrouter ask [問題...] [-m 模型] [-s 系統提示] [--no-stream]
+  openrouter ask [問題...] [-m 模型] [-s 系統提示] [--no-stream] [--no-agent]
                                       單次提問，可從 pipe 接內容，例如：
                                       Get-Content app.log | openrouter ask "幫我摘要錯誤"
   openrouter models [關鍵字...] [--free] [--refresh]
@@ -30,17 +31,22 @@ const HELP = `openrouter — OpenRouter 命令列工具
   openrouter sessions                 列出對話紀錄
   openrouter help                     顯示這份說明
 
+唯讀工具（預設開啟）：模型可以列目錄、讀檔、搜尋你啟動 CLI 時所在資料夾裡的檔案，
+不能修改或執行任何東西。讀到的內容會送到 OpenRouter 與模型供應商；.env、私鑰等敏感檔案一律拒讀。
+不想讓模型讀檔時加 --no-agent，或在對話中輸入 /agent off。
+
 問題以 - 開頭時，放在 -- 後面：openrouter ask -- "-1 的平方根"
 
 資料位置：${store.DATA_DIR}
-環境變數 OPENROUTER_API_KEY 有設定時，會優先於 data/config.json 裡的 key。`;
+環境變數 OPENROUTER_API_KEY 有設定時，會優先於資料位置裡 config.json 的 key。`;
 
 const REPL_HELP = `對話中的指令：
   /model [關鍵字]        列出最近用過的模型與價格，輸入編號切換、輸入關鍵字搜尋
                          （帶完整 id 或只符合一個的關鍵字會直接切換；只影響這段對話）
   /default               把這段對話的模型設成預設模型
   /models <關鍵字>       只列出搜尋結果與價格，不切換
-  /system [文字]         設定系統提示；不帶文字就清除
+  /agent on|off          這段對話開／關唯讀工具（讓模型讀工作資料夾裡的檔案）
+  /system [文字]         自訂系統提示（取代預設的「用繁體中文回答」）；不帶文字就恢復預設
   /think on|off          顯示或隱藏模型的思考過程
   /stream on|off         串流輸出開關
   /new                   開新對話
@@ -73,6 +79,7 @@ async function main() {
       model: { type: 'string', short: 'm' },
       system: { type: 'string', short: 's' },
       'no-stream': { type: 'boolean' },
+      'no-agent': { type: 'boolean' },
       continue: { type: 'boolean', short: 'c' },
       session: { type: 'string' },
       free: { type: 'boolean' },
@@ -260,17 +267,18 @@ function printModels(list, { limit = 30, current, numbered = false } = {}) {
   const width = Math.max(...shown.map((m) => m.id.length), 4);
   const numWidth = String(shown.length).length;
   const indent = ' '.repeat(2 + (numbered ? numWidth + 1 : 0));
-  console.log(dim(`${indent}${'模型'.padEnd(width - 2)}  context    入/1M    出/1M`));
+  console.log(dim(`${indent}${'模型'.padEnd(width - 2)}  context    入/1M    出/1M  工具`));
   shown.forEach((m, i) => {
     const mark = m.id === current ? green('*') : ' ';
     const num = numbered ? `${String(i + 1).padStart(numWidth)} ` : '';
     const ctx = contextSize(m.context_length).padStart(7);
     const input = perMillion(m.pricing?.prompt).padStart(7);
     const output = perMillion(m.pricing?.completion).padStart(7);
-    console.log(`${mark} ${num}${m.id.padEnd(width)}  ${ctx}  ${input}  ${output}`);
+    const toolMark = m.supported_parameters?.includes('tools') ? '  ✓' : '';
+    console.log(`${mark} ${num}${m.id.padEnd(width)}  ${ctx}  ${input}  ${output}${toolMark}`);
   });
   if (list.length > limit) console.log(dim(`…還有 ${list.length - limit} 個，加關鍵字縮小範圍`));
-  console.log(dim('價格為每百萬 tokens（USD），入＝送出的內容，出＝模型的回覆；* 是目前的模型'));
+  console.log(dim('價格為每百萬 tokens（USD），入＝送出的內容，出＝模型的回覆；* 是目前的模型；工具 ✓＝能讀檔'));
 }
 
 const findModel = (models, id) => models.find((m) => m.id === id);
@@ -364,12 +372,23 @@ async function cmdUse(terms) {
 
 // ── 對話 ────────────────────────────────────────────────
 
-function usageLine(usage, served, requested) {
+function usageLine(usage, served, requested, toolRuns = 0) {
   if (!usage) return '';
   const parts = [`${usage.prompt_tokens ?? 0} 入／${usage.completion_tokens ?? 0} 出 tokens`];
   if (typeof usage.cost === 'number') parts.push(usage.cost === 0 ? '免費' : usd(usage.cost, 6));
+  if (toolRuns) parts.push(`工具 ${toolRuns} 次`);
   if (served && served !== requested) parts.push(`實際回覆模型 ${served}`);
   return `[${parts.join('，')}]`;
+}
+
+// 一輪裡可能有好幾次請求（agent 迴圈），用量要加總後再顯示
+function mergeUsage(total, usage) {
+  if (!usage) return total;
+  const sum = total ?? { prompt_tokens: 0, completion_tokens: 0 };
+  sum.prompt_tokens += usage.prompt_tokens ?? 0;
+  sum.completion_tokens += usage.completion_tokens ?? 0;
+  if (typeof usage.cost === 'number') sum.cost = (sum.cost ?? 0) + usage.cost;
+  return sum;
 }
 
 function addUsage(session, usage) {
@@ -381,11 +400,8 @@ function addUsage(session, usage) {
   total.requests += 1;
 }
 
-// 送出 session 目前的訊息並把回覆接到 session 上。
-// 失敗或模型回空白時撤回這一輪的提問，讓對話紀錄保持乾淨、使用者可以直接重送。
-async function runTurn(key, session, { showReasoning = false, signal } = {}) {
-  const history = session.messages.map(({ role, content }) => ({ role, content }));
-  const messages = session.system ? [{ role: 'system', content: session.system }, ...history] : history;
+// 送出一次請求並把串流內容印出來；思考過程依 showReasoning 顯示，或只提示「思考中」
+async function callModel(key, session, messages, { showReasoning = false, signal, toolDefs, toolChoice } = {}) {
   let reasoningShown = false;
   let thinkingNotice = false;
   let started = false;
@@ -398,6 +414,8 @@ async function runTurn(key, session, { showReasoning = false, signal } = {}) {
       messages,
       stream: session.stream !== false,
       signal,
+      tools: toolDefs,
+      toolChoice,
       onReasoning(text) {
         if (showReasoning) {
           process.stdout.write(dim(text));
@@ -419,24 +437,129 @@ async function runTurn(key, session, { showReasoning = false, signal } = {}) {
   } catch (err) {
     if (started) process.stdout.write('\n'); // 已印出部分回答時，讓錯誤訊息換行顯示
     else if (thinkingNotice) process.stderr.write('\n');
-    session.messages.pop();
+    throw err;
+  }
+  // 只有「思考中」提示、沒有內容（例如接著要呼叫工具）時，把提示清掉
+  if (!started && thinkingNotice) process.stderr.write(process.stderr.isTTY ? '\r\x1b[K' : '\n');
+  if ((started && !result.text.endsWith('\n')) || (!started && reasoningShown)) process.stdout.write('\n');
+  return result;
+}
+
+const DEFAULT_SYSTEM = '請一律使用繁體中文（台灣用語）回答。';
+const MAX_TOOL_STEPS = 25;
+
+function agentPrompt(ctx) {
+  return [
+    '你在使用者的電腦上執行，可以用工具查看「工作資料夾」裡的檔案：',
+    `- 工作資料夾：${ctx.root}`,
+    `- 作業系統：${process.platform}；今天日期：${new Date().toISOString().slice(0, 10)}`,
+    '- 你只有唯讀工具（list_dir、read_file、search、find_files），不能修改、建立或刪除檔案，也不能執行指令；需要修改或執行時，把建議寫給使用者自己做。',
+    '- 使用者問到這個資料夾、專案、檔案或程式碼時，先用工具查看再回答，不要請使用者貼檔案內容或目錄樹。',
+    '- 先用 list_dir 了解結構，再用 find_files 或 search 找相關檔案，最後用 read_file 讀需要的部分；不要一次讀進大量無關的檔案。',
+    '- 引用檔案時用相對路徑與行號，例如 src/server.cs:42。',
+  ].join('\n');
+}
+
+// 使用者自訂的系統提示會取代預設的語言要求；開了唯讀工具時再附上工作資料夾與工具規則
+function systemPrompt(session, ctx) {
+  const parts = [session.system || DEFAULT_SYSTEM];
+  if (ctx) parts.push(agentPrompt(ctx));
+  return parts.join('\n\n');
+}
+
+// 模型清單有標 supported_parameters；清單裡查不到的模型先當作支援，交給 API 判斷
+async function supportsTools(modelId) {
+  const model = findModel(await getModels().catch(() => []), modelId);
+  return !Array.isArray(model?.supported_parameters) || model.supported_parameters.includes('tools');
+}
+
+const toApiMessage = ({ role, content, tool_calls, tool_call_id }) => ({
+  role,
+  content,
+  ...(tool_calls && { tool_calls }),
+  ...(tool_call_id && { tool_call_id }),
+});
+
+// 送出這一輪並把回覆接到 session 上。開著唯讀工具時跑 agent 迴圈：
+// 模型要求工具 → 本機執行 → 結果交回模型，直到模型給出回答。
+// 失敗或模型回空白時撤回整輪（提問與中間的工具往返），讓對話紀錄保持乾淨、使用者可以直接重送。
+async function runTurn(key, session, { showReasoning = false, signal, toolCtx = null } = {}) {
+  const turnStart = session.messages.length - 1;
+  let ctx = toolCtx;
+  if (ctx && !(await supportsTools(session.model))) {
+    console.error(dim('（這個模型不支援工具呼叫，這一輪改用一般聊天；/model 清單裡標 ✓ 的模型才能讀檔）', process.stderr));
+    ctx = null;
+  }
+
+  let result;
+  let turnUsage = null;
+  let toolRuns = 0;
+  try {
+    for (let step = 1; ; step++) {
+      const messages = [{ role: 'system', content: systemPrompt(session, ctx) }, ...session.messages.map(toApiMessage)];
+      try {
+        result = await callModel(key, session, messages, {
+          showReasoning,
+          signal,
+          toolDefs: ctx ? tools.DEFINITIONS : undefined,
+          toolChoice: ctx && step >= MAX_TOOL_STEPS ? 'none' : undefined, // 到上限就要求模型直接回答
+        });
+      } catch (err) {
+        // 供應商不支援工具時，第一步就會被拒；退回一般聊天重試一次
+        if (ctx && step === 1 && err.status === 404 && /tool/i.test(err.message)) {
+          console.error(dim('（這個模型的供應商不支援工具呼叫，這一輪改用一般聊天）', process.stderr));
+          ctx = null;
+          step = 0;
+          continue;
+        }
+        throw err;
+      }
+      addUsage(session, result.usage);
+      turnUsage = mergeUsage(turnUsage, result.usage);
+      if (!ctx || result.finish === 'aborted') break;
+
+      let calls = result.toolCalls;
+      let content = result.text;
+      if (!calls.length) {
+        calls = tools.parseTextToolCalls(result.text);
+        if (calls.length) {
+          content = tools.stripTextToolCalls(result.text);
+          console.error(dim('（模型用文字格式呼叫工具，已改用備援解析）', process.stderr));
+        }
+      }
+      if (!calls.length) break;
+      if (step >= MAX_TOOL_STEPS) {
+        console.error(yellow(`（已達工具呼叫上限 ${MAX_TOOL_STEPS} 輪，停止）`, process.stderr));
+        break;
+      }
+
+      session.messages.push({
+        role: 'assistant',
+        content: content || null,
+        tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.arguments } })),
+      });
+      for (const call of calls) {
+        const output = tools.runTool(ctx, call.name, call.arguments);
+        console.error(dim(`  ↳ ${output.summary}`, process.stderr));
+        session.messages.push({ role: 'tool', tool_call_id: call.id, content: output.content });
+        toolRuns++;
+      }
+    }
+  } catch (err) {
+    session.messages.length = turnStart;
     throw err;
   }
 
-  if (!started && thinkingNotice) process.stderr.write('\n');
-  if ((started && !result.text.endsWith('\n')) || (!started && reasoningShown)) process.stdout.write('\n');
-  addUsage(session, result.usage);
   if (result.finish === 'aborted') console.error(yellow('（已中斷）', process.stderr));
-
   if (!result.text) {
-    session.messages.pop();
+    session.messages.length = turnStart;
     if (result.finish !== 'aborted') {
       console.error(yellow(`（模型沒有回任何內容，finish_reason=${result.finish ?? '無'}；這一輪沒有記進對話）`, process.stderr));
     }
     return result;
   }
   session.messages.push({ role: 'assistant', content: result.text, model: result.model });
-  const info = usageLine(result.usage, result.model, session.model);
+  const info = usageLine(turnUsage, result.model, session.model, toolRuns);
   if (info) console.error(dim(info, process.stderr));
   return result;
 }
@@ -456,9 +579,12 @@ async function cmdAsk(terms, opts) {
   session.stream = !opts['no-stream'];
   session.messages.push({ role: 'user', content: prompt });
 
+  const agentOn = !opts['no-agent'] && config.agent !== false;
+  const toolCtx = agentOn ? tools.createContext(process.cwd(), [store.DATA_DIR]) : null;
+
   const ctrl = new AbortController();
   process.once('SIGINT', () => ctrl.abort());
-  const result = await runTurn(key, session, { signal: ctrl.signal });
+  const result = await runTurn(key, session, { signal: ctrl.signal, toolCtx });
   if (session.messages.length) store.saveSession(session);
   if (!result.text) process.exitCode = 1;
 }
@@ -482,6 +608,9 @@ async function cmdChat(opts) {
   if (opts.system !== undefined) session.system = opts.system;
   if (opts['no-stream']) session.stream = false;
   let showReasoning = config.showReasoning ?? false;
+  let agentOn = !opts['no-agent'] && config.agent !== false;
+  const toolCtx = tools.createContext(process.cwd(), [store.DATA_DIR]);
+  const agentStatus = () => (agentOn ? `開（模型可以讀 ${toolCtx.root} 裡的檔案；/agent off 關閉）` : '關（/agent on 開啟）');
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, historySize: 500 });
   const ask = questioner(rl);
@@ -494,6 +623,7 @@ async function cmdChat(opts) {
 
   console.log(`${cyan('OpenRouter 對話')} ${dim(`· ${session.id} · /help 看指令，/model 換模型，/exit 離開`)}`);
   console.log(dim(`模型 ${session.model}：${priceTag(findModel(await getModels().catch(() => []), session.model))}`));
+  console.log(dim(`唯讀工具：${agentStatus()}`));
   if (session.messages.length) console.log(dim(`接續先前的對話（${session.messages.length} 則訊息）`));
 
   for (;;) {
@@ -548,7 +678,11 @@ async function cmdChat(opts) {
             break;
           case 'system':
             session.system = arg;
-            console.log(dim(arg ? '已設定系統提示' : '已清除系統提示'));
+            console.log(dim(arg ? '已設定系統提示（取代預設的繁體中文要求）' : '已清除自訂系統提示，恢復預設（用繁體中文回答）'));
+            break;
+          case 'agent':
+            if (arg === 'on' || arg === 'off') agentOn = arg === 'on';
+            console.log(dim(`唯讀工具：${agentStatus()}`));
             break;
           case 'think':
             if (arg === 'on' || arg === 'off') {
@@ -577,7 +711,7 @@ async function cmdChat(opts) {
 
       session.messages.push({ role: 'user', content: line });
       ctrl = new AbortController();
-      await runTurn(key, session, { showReasoning, signal: ctrl.signal });
+      await runTurn(key, session, { showReasoning, signal: ctrl.signal, toolCtx: agentOn ? toolCtx : null });
     } catch (err) {
       console.error(red(err.message, process.stderr));
     } finally {
