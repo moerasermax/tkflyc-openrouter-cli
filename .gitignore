@@ -1,0 +1,3 @@
+# data/ 內有 API key 與完整對話紀錄，不可進版控
+data/
+node_modules/

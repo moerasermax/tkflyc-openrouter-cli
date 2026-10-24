@@ -1,0 +1,38 @@
+{
+  "name": "@tkflyc/openrouter-cli",
+  "version": "0.1.0",
+  "description": "OpenRouter 命令列工具：互動對話（串流）、單次提問（可接 pipe）、模型搜尋與切換（附價格）、額度查詢",
+  "type": "module",
+  "bin": {
+    "openrouter": "bin/openrouter.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "openrouter",
+    "cli",
+    "llm",
+    "chat",
+    "terminal"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moerasermax/tkflyc-openrouter-cli.git"
+  },
+  "homepage": "https://github.com/moerasermax/tkflyc-openrouter-cli#readme",
+  "bugs": {
+    "url": "https://github.com/moerasermax/tkflyc-openrouter-cli/issues"
+  },
+  "author": "tkflyc",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}
