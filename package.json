@@ -7,6 +7,9 @@
   "bin": {
     "openrouter": "bin/openrouter.js"
   },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
   "files": [
     "bin",
     "src",
